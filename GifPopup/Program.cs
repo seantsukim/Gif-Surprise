@@ -4,9 +4,10 @@ using System.IO;
 using System.Windows.Forms;
 
 // Minimal random-GIF desktop popup.
-// Put your .gif files in a "gifs" folder next to the .exe (or on your Desktop\gifs).
+// Put your .gif files in a "gifs" folder next to the .exe.
 // It shows a small always-on-top window that never steals focus, so it won't
 // interrupt whatever you're typing or clicking in another app.
+// Right-click the tray icon and choose Exit to close it.
 
 class GifPopup : Form
 {
@@ -14,10 +15,18 @@ class GifPopup : Form
     readonly Random rng = new Random();
     readonly string[] gifs;
     readonly Timer switchTimer = new Timer();
+    readonly NotifyIcon trayIcon = new NotifyIcon();
 
     public GifPopup(string folder)
     {
         gifs = Directory.Exists(folder) ? Directory.GetFiles(folder, "*.gif") : Array.Empty<string>();
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Exit", null, (s, e) => Application.Exit());
+        trayIcon.Icon = SystemIcons.Application;
+        trayIcon.Text = "Gif Popup (right-click to exit)";
+        trayIcon.ContextMenuStrip = menu;
+        trayIcon.Visible = true;
 
         FormBorderStyle = FormBorderStyle.None;
         TopMost = true;
@@ -37,6 +46,8 @@ class GifPopup : Form
         switchTimer.Start();
 
         ShowRandomGif();
+
+        FormClosed += (s, e) => trayIcon.Visible = false;
     }
 
     // Prevents the window from ever taking keyboard focus.
@@ -75,10 +86,27 @@ class GifPopup : Form
     [STAThread]
     static void Main()
     {
-        string folder = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "gifs");
+        // "gifs" folder lives next to the .csproj (the project root), not in
+        // bin\Debug\... so it survives rebuilds and `dotnet clean`.
+        string folder = Path.Combine(FindProjectRoot(), "gifs");
 
         Application.EnableVisualStyles();
         Application.Run(new GifPopup(folder));
+    }
+
+    // Walks up from the .exe's folder (e.g. bin\Debug\net8.0-windows\) until
+    // it finds a folder containing a .csproj file.
+    static string FindProjectRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null)
+        {
+            if (dir.GetFiles("*.csproj").Length > 0)
+                return dir.FullName;
+            dir = dir.Parent;
+        }
+        // Fallback: just use the .exe's own folder if no .csproj is found
+        // (e.g. after publishing as a standalone exe).
+        return AppContext.BaseDirectory;
     }
 }
