@@ -1,97 +1,113 @@
 using System;
-using System.Drawing;
 using System.IO;
-using System.Windows.Forms;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media;
+using Forms = System.Windows.Forms;
 
-// Minimal random-GIF desktop popup.
-// Put your .gif files in a "gifs" folder next to the .exe.
-// It shows a small always-on-top window that never steals focus, so it won't
-// interrupt whatever you're typing or clicking in another app.
+// Minimal random-video desktop popup.
+// Put your .mp4 files in a "videos" folder next to the .csproj (project root).
+// Shows a small always-on-top, borderless window that plays a random video
+// with sound, then moves on to another random one when it finishes.
+// It never steals keyboard/mouse focus, so it won't interrupt your workflow.
 // Right-click the tray icon and choose Exit to close it.
 
-class GifPopup : Form
+class VideoPopup : Window
 {
-    readonly PictureBox pb = new PictureBox();
+    readonly MediaElement player = new MediaElement();
     readonly Random rng = new Random();
-    readonly string[] gifs;
-    readonly Timer switchTimer = new Timer();
-    readonly NotifyIcon trayIcon = new NotifyIcon();
+    readonly string[] videos;
+    readonly Forms.NotifyIcon trayIcon = new Forms.NotifyIcon();
 
-    public GifPopup(string folder)
+    public VideoPopup(string folder)
     {
-        gifs = Directory.Exists(folder) ? Directory.GetFiles(folder, "*.gif") : Array.Empty<string>();
+        videos = Directory.Exists(folder) ? Directory.GetFiles(folder, "*.mp4") : Array.Empty<string>();
 
-        var menu = new ContextMenuStrip();
-        menu.Items.Add("Exit", null, (s, e) => Application.Exit());
-        trayIcon.Icon = SystemIcons.Application;
-        trayIcon.Text = "Gif Popup (right-click to exit)";
+        // Tray icon so there's a reliable way to close a window that never takes focus.
+        var menu = new Forms.ContextMenuStrip();
+        menu.Items.Add("Exit", null, (s, e) => Application.Current.Shutdown());
+        trayIcon.Icon = System.Drawing.SystemIcons.Application;
+        trayIcon.Text = "Video Popup (right-click to exit)";
         trayIcon.ContextMenuStrip = menu;
         trayIcon.Visible = true;
+        Closed += (s, e) => trayIcon.Visible = false;
 
-        FormBorderStyle = FormBorderStyle.None;
-        TopMost = true;
+        WindowStyle = WindowStyle.None;
+        ResizeMode = ResizeMode.NoResize;
+        AllowsTransparency = true;
+        Background = Brushes.Transparent;
+        Topmost = true;
         ShowInTaskbar = false;
-        StartPosition = FormStartPosition.Manual;
-        Size = new Size(220, 220);
-        BackColor = Color.Magenta;
-        TransparencyKey = Color.Magenta; // makes the background transparent
+        ShowActivated = false; // don't take focus when first shown
+        Width = 360;
+        Height = 240;
+        WindowStartupLocation = WindowStartupLocation.Manual;
 
-        pb.Dock = DockStyle.Fill;
-        pb.SizeMode = PictureBoxSizeMode.Zoom;
-        pb.BackColor = Color.Transparent;
-        Controls.Add(pb);
+        player.LoadedBehavior = MediaState.Manual;
+        player.UnloadedBehavior = MediaState.Manual;
+        player.Stretch = Stretch.Uniform; // keep aspect ratio, letterbox if needed
+        player.Volume = 0.7;
+        player.MediaEnded += (s, e) => ShowRandomVideo();
+        Content = player;
 
-        switchTimer.Interval = 20000; // new random gif every 20s
-        switchTimer.Tick += (s, e) => ShowRandomGif();
-        switchTimer.Start();
-
-        ShowRandomGif();
-
-        FormClosed += (s, e) => trayIcon.Visible = false;
+        ShowRandomVideo();
     }
 
-    // Prevents the window from ever taking keyboard focus.
-    protected override bool ShowWithoutActivation => true;
-    protected override CreateParams CreateParams
+    // --- Prevents the window from ever taking keyboard/mouse focus ---
+    const int GWL_EXSTYLE = -20;
+    const int WS_EX_NOACTIVATE = 0x08000000;
+    const int WM_MOUSEACTIVATE = 0x0021;
+    const int MA_NOACTIVATE = 3;
+
+    [DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    protected override void OnSourceInitialized(EventArgs e)
     {
-        get
+        base.OnSourceInitialized(e);
+        var hwnd = new WindowInteropHelper(this).Handle;
+        int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+        SetWindowLong(hwnd, GWL_EXSTYLE, exStyle | WS_EX_NOACTIVATE);
+        HwndSource.FromHwnd(hwnd).AddHook(WndProc);
+    }
+
+    IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_MOUSEACTIVATE)
         {
-            var cp = base.CreateParams;
-            cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
-            return cp;
+            handled = true;
+            return (IntPtr)MA_NOACTIVATE;
         }
+        return IntPtr.Zero;
     }
+    // -------------------------------------------------------------
 
-    void ShowRandomGif()
+    void ShowRandomVideo()
     {
-        if (gifs.Length == 0) return;
+        if (videos.Length == 0) return;
 
-        var path = gifs[rng.Next(gifs.Length)];
-        var img = Image.FromFile(path);
-        pb.Image = img;
-        ImageAnimator.Animate(img, OnFrameChanged);
+        var path = videos[rng.Next(videos.Length)];
+        player.Source = new Uri(path);
+        player.Play();
 
-        var area = Screen.PrimaryScreen.WorkingArea;
-        Location = new Point(rng.Next(area.Width - Width), rng.Next(area.Height - Height));
+        var area = SystemParameters.WorkArea;
+        Left = rng.Next(0, Math.Max(1, (int)(area.Width - Width)));
+        Top = rng.Next(0, Math.Max(1, (int)(area.Height - Height)));
 
-        if (!Visible) Show();
-    }
-
-    void OnFrameChanged(object sender, EventArgs e)
-    {
-        ImageAnimator.UpdateFrames(pb.Image);
-        pb.Invalidate();
+        if (!IsVisible) Show();
     }
 
     [STAThread]
     static void Main()
     {
-        // "gifs" folder lives next to the .csproj (the project root), not in
+        // "videos" folder lives next to the .csproj (the project root), not in
         // bin\Debug\... so it survives rebuilds and `dotnet clean`.
-        string folder = Path.Combine(FindProjectRoot(), "gifs");
+        string folder = Path.Combine(FindProjectRoot(), "videos");
 
-        Application.EnableVisualStyles();
-        Application.Run(new GifPopup(folder));
+        var app = new Application();
+        app.Run(new VideoPopup(folder));
     }
 
     // Walks up from the .exe's folder (e.g. bin\Debug\net8.0-windows\) until
@@ -105,8 +121,6 @@ class GifPopup : Form
                 return dir.FullName;
             dir = dir.Parent;
         }
-        // Fallback: just use the .exe's own folder if no .csproj is found
-        // (e.g. after publishing as a standalone exe).
         return AppContext.BaseDirectory;
     }
 }
