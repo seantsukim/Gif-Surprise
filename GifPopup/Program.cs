@@ -40,6 +40,12 @@ class VideoPopup : Window
     readonly System.Windows.Threading.DispatcherTimer cooldownTimer = new System.Windows.Threading.DispatcherTimer();
     int frameSkip = 0;
 
+    // True while a new clip is loading. The popup stays hidden until the first
+    // real frame of the new clip has been drawn, so no still frame or leftover
+    // frame from the previous clip is ever shown.
+    bool waitingForFirstFrame = false;
+    static readonly byte[] emptyPixels = new byte[W * H * 4];
+
     public VideoPopup(string folder)
     {
         videos = Directory.Exists(folder) ? Directory.GetFiles(folder, "*.mp4") : Array.Empty<string>();
@@ -140,8 +146,14 @@ class VideoPopup : Window
     // the result into the visible bitmap. Skips every other tick to save CPU.
     void OnRendering(object sender, EventArgs e)
     {
-        if (!IsVisible || player.Source == null || player.NaturalVideoWidth == 0) return;
-        if (++frameSkip % 2 != 0) return;
+        if (!IsVisible && !waitingForFirstFrame) return;
+        if (player.Source == null || player.NaturalVideoWidth == 0) return;
+
+        // Don't grab anything until playback has actually advanced from the start,
+        // otherwise we'd capture a frozen/stale frame.
+        if (waitingForFirstFrame && player.Position <= TimeSpan.Zero) return;
+
+        if (!waitingForFirstFrame && ++frameSkip % 2 != 0) return;
 
         var rtb = new RenderTargetBitmap(W, H, 96, 96, PixelFormats.Pbgra32);
         rtb.Render(player);
@@ -164,12 +176,28 @@ class VideoPopup : Window
         }
 
         bitmap.WritePixels(new Int32Rect(0, 0, W, H), pixelBuffer, W * 4, 0);
+
+        // First live frame is ready: reveal the popup mid-motion.
+        if (waitingForFirstFrame)
+        {
+            waitingForFirstFrame = false;
+            if (!IsVisible) Show();
+        }
+    }
+
+    // Wipes the visible bitmap so the last frame of a clip can't reappear
+    // the next time the popup is shown.
+    void ClearBitmap()
+    {
+        bitmap.WritePixels(new Int32Rect(0, 0, W, H), emptyPixels, W * 4, 0);
     }
 
     // Hides the popup and waits a random amount of time before the next clip.
     void StartCooldown()
     {
         Hide();
+        player.Stop();
+        ClearBitmap();
         double seconds = MinCooldownSeconds + rng.NextDouble() * (MaxCooldownSeconds - MinCooldownSeconds);
         cooldownTimer.Interval = TimeSpan.FromSeconds(seconds);
         cooldownTimer.Start();
@@ -180,10 +208,20 @@ class VideoPopup : Window
         if (videos.Length == 0) return;
 
         var path = videos[rng.Next(videos.Length)];
-        player.Source = new Uri(path);
-        player.Play();
 
-        if (!IsVisible) Show();
+        // Clear the old source first. Assigning the same file again is otherwise
+        // treated as "no change", leaving the player parked at the end of the clip.
+        player.Stop();
+        player.Close();
+        player.Source = null;
+        ClearBitmap();
+
+        player.Source = new Uri(path);
+        player.Position = TimeSpan.Zero;
+        frameSkip = 0;
+        waitingForFirstFrame = true;
+        player.Play();
+        // The window is shown from OnRendering once the first frame is ready.
     }
 
     [STAThread]
