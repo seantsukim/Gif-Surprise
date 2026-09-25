@@ -17,7 +17,13 @@ using Forms = System.Windows.Forms;
 
 class VideoPopup : Window
 {
-    const int W = 360, H = 240;
+    // Sized to the primary screen at startup so the popup fills the desktop.
+    static readonly int W = (int)SystemParameters.PrimaryScreenWidth;
+    static readonly int H = (int)SystemParameters.PrimaryScreenHeight;
+
+    // Random pause between clips, in seconds. Adjust these two numbers.
+    const double MinCooldownSeconds = 5;
+    const double MaxCooldownSeconds = 30;
 
     // The real video plays here, off-screen, never seen directly.
     readonly Window hiddenHost;
@@ -31,6 +37,7 @@ class VideoPopup : Window
     readonly Random rng = new Random();
     readonly string[] videos;
     readonly Forms.NotifyIcon trayIcon = new Forms.NotifyIcon();
+    readonly System.Windows.Threading.DispatcherTimer cooldownTimer = new System.Windows.Threading.DispatcherTimer();
     int frameSkip = 0;
 
     public VideoPopup(string folder)
@@ -49,6 +56,8 @@ class VideoPopup : Window
         Width = W;
         Height = H;
         WindowStartupLocation = WindowStartupLocation.Manual;
+        Left = 0;
+        Top = 0;
         displayImage.Source = bitmap;
         displayImage.Stretch = Stretch.Uniform;
         Content = displayImage;
@@ -69,8 +78,14 @@ class VideoPopup : Window
         player.UnloadedBehavior = MediaState.Manual;
         player.Stretch = Stretch.Uniform;
         player.Volume = 0.7;
-        player.MediaEnded += (s, e) => ShowRandomVideo();
+        player.MediaEnded += (s, e) => StartCooldown();
         hiddenHost.Show();
+
+        cooldownTimer.Tick += (s, e) =>
+        {
+            cooldownTimer.Stop();
+            ShowRandomVideo();
+        };
 
         // Tray icon so there's a reliable way to close a window that never takes focus.
         var menu = new Forms.ContextMenuStrip();
@@ -125,7 +140,7 @@ class VideoPopup : Window
     // the result into the visible bitmap. Skips every other tick to save CPU.
     void OnRendering(object sender, EventArgs e)
     {
-        if (player.Source == null || player.NaturalVideoWidth == 0) return;
+        if (!IsVisible || player.Source == null || player.NaturalVideoWidth == 0) return;
         if (++frameSkip % 2 != 0) return;
 
         var rtb = new RenderTargetBitmap(W, H, 96, 96, PixelFormats.Pbgra32);
@@ -151,6 +166,15 @@ class VideoPopup : Window
         bitmap.WritePixels(new Int32Rect(0, 0, W, H), pixelBuffer, W * 4, 0);
     }
 
+    // Hides the popup and waits a random amount of time before the next clip.
+    void StartCooldown()
+    {
+        Hide();
+        double seconds = MinCooldownSeconds + rng.NextDouble() * (MaxCooldownSeconds - MinCooldownSeconds);
+        cooldownTimer.Interval = TimeSpan.FromSeconds(seconds);
+        cooldownTimer.Start();
+    }
+
     void ShowRandomVideo()
     {
         if (videos.Length == 0) return;
@@ -158,10 +182,6 @@ class VideoPopup : Window
         var path = videos[rng.Next(videos.Length)];
         player.Source = new Uri(path);
         player.Play();
-
-        var area = SystemParameters.WorkArea;
-        Left = rng.Next(0, Math.Max(1, (int)(area.Width - Width)));
-        Top = rng.Next(0, Math.Max(1, (int)(area.Height - Height)));
 
         if (!IsVisible) Show();
     }
