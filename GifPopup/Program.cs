@@ -25,6 +25,12 @@ class VideoPopup : Window
     const double MinCooldownSeconds = 5;
     const double MaxCooldownSeconds = 30;
 
+    // Green-screen keying. A pixel is made fully transparent when its green
+    // channel is above MinKeyGreen and at least KeyDominance times red and blue.
+    // 30 (not higher) so the darker green along the video's edges is removed too.
+    const int MinKeyGreen = 30;
+    const double KeyDominance = 1.3;
+
     // The real video plays here, off-screen, never seen directly.
     readonly Window hiddenHost;
     // A fresh MediaElement is created for every clip (see CreatePlayer), so the
@@ -162,7 +168,7 @@ class VideoPopup : Window
         // The decoder may not have drawn anything yet. Wait for a real frame.
         if (waitingForFirstFrame)
         {
-            if (!HasVisiblePixels()) return;
+            if (!HasRealVideoFrame()) return;
             waitingForFirstFrame = false;
         }
 
@@ -173,7 +179,7 @@ class VideoPopup : Window
             byte r = pixelBuffer[i + 2];
 
             // Green screen test: green channel clearly dominant over red & blue.
-            if (g > 60 && g > r * 1.3 && g > b * 1.3)
+            if (g > MinKeyGreen && g > r * KeyDominance && g > b * KeyDominance)
             {
                 pixelBuffer[i] = 0;
                 pixelBuffer[i + 1] = 0;
@@ -185,12 +191,20 @@ class VideoPopup : Window
         bitmap.WritePixels(new Int32Rect(0, 0, W, H), pixelBuffer, W * 4, 0);
     }
 
-    // True if the captured frame has any non-transparent pixel, i.e. the video
-    // has actually drawn something.
-    bool HasVisiblePixels()
+    // True once the video has drawn a real frame. Before its first decoded
+    // frame, MediaElement paints a solid black placeholder; that black isn't
+    // green, so keying wouldn't remove it. Wait for a pixel that isn't black.
+    bool HasRealVideoFrame()
     {
-        for (int i = 3; i < pixelBuffer.Length; i += 4)
-            if (pixelBuffer[i] != 0) return true;
+        const int MaxPlaceholderLevel = 16;
+        for (int i = 0; i < pixelBuffer.Length; i += 4)
+        {
+            if (pixelBuffer[i + 3] == 0) continue; // nothing drawn here
+            if (pixelBuffer[i] > MaxPlaceholderLevel ||
+                pixelBuffer[i + 1] > MaxPlaceholderLevel ||
+                pixelBuffer[i + 2] > MaxPlaceholderLevel)
+                return true;
+        }
         return false;
     }
 
