@@ -27,7 +27,9 @@ class VideoPopup : Window
 
     // The real video plays here, off-screen, never seen directly.
     readonly Window hiddenHost;
-    readonly MediaElement player = new MediaElement();
+    // A fresh MediaElement is created for every clip (see CreatePlayer), so the
+    // previous clip's last frame can never be drawn at the start of the next one.
+    MediaElement player;
 
     // The visible window shows only the chroma-keyed result.
     readonly System.Windows.Controls.Image displayImage = new System.Windows.Controls.Image();
@@ -40,10 +42,15 @@ class VideoPopup : Window
     readonly System.Windows.Threading.DispatcherTimer cooldownTimer = new System.Windows.Threading.DispatcherTimer();
     int frameSkip = 0;
 
-    // True while a new clip is loading. The popup stays hidden until the first
-    // real frame of the new clip has been drawn, so no still frame or leftover
-    // frame from the previous clip is ever shown.
+    // True while a clip is playing. Between clips the popup stays on screen but
+    // fully transparent (transparent pixels are click-through), so it never has
+    // to be re-shown with a stale image on it.
+    bool clipActive = false;
+
+    // True until the new clip's media has opened and produced its first real
+    // frame. Nothing is drawn until then, so no still or leftover frame shows.
     bool waitingForFirstFrame = false;
+    bool mediaOpened = false;
     static readonly byte[] emptyPixels = new byte[W * H * 4];
 
     public VideoPopup(string folder)
@@ -77,14 +84,8 @@ class VideoPopup : Window
             ShowInTaskbar = false,
             ShowActivated = false,
             Left = -100000,
-            Top = -100000,
-            Content = player
+            Top = -100000
         };
-        player.LoadedBehavior = MediaState.Manual;
-        player.UnloadedBehavior = MediaState.Manual;
-        player.Stretch = Stretch.Uniform;
-        player.Volume = 0.7;
-        player.MediaEnded += (s, e) => StartCooldown();
         hiddenHost.Show();
 
         cooldownTimer.Tick += (s, e) =>
@@ -146,11 +147,10 @@ class VideoPopup : Window
     // the result into the visible bitmap. Skips every other tick to save CPU.
     void OnRendering(object sender, EventArgs e)
     {
-        if (!IsVisible && !waitingForFirstFrame) return;
-        if (player.Source == null || player.NaturalVideoWidth == 0) return;
+        if (!clipActive || player == null || !mediaOpened || player.NaturalVideoWidth == 0) return;
 
         // Don't grab anything until playback has actually advanced from the start,
-        // otherwise we'd capture a frozen/stale frame.
+        // otherwise we'd capture a frozen frame.
         if (waitingForFirstFrame && player.Position <= TimeSpan.Zero) return;
 
         if (!waitingForFirstFrame && ++frameSkip % 2 != 0) return;
@@ -158,6 +158,13 @@ class VideoPopup : Window
         var rtb = new RenderTargetBitmap(W, H, 96, 96, PixelFormats.Pbgra32);
         rtb.Render(player);
         rtb.CopyPixels(pixelBuffer, W * 4, 0);
+
+        // The decoder may not have drawn anything yet. Wait for a real frame.
+        if (waitingForFirstFrame)
+        {
+            if (!HasVisiblePixels()) return;
+            waitingForFirstFrame = false;
+        }
 
         for (int i = 0; i < pixelBuffer.Length; i += 4)
         {
@@ -176,13 +183,15 @@ class VideoPopup : Window
         }
 
         bitmap.WritePixels(new Int32Rect(0, 0, W, H), pixelBuffer, W * 4, 0);
+    }
 
-        // First live frame is ready: reveal the popup mid-motion.
-        if (waitingForFirstFrame)
-        {
-            waitingForFirstFrame = false;
-            if (!IsVisible) Show();
-        }
+    // True if the captured frame has any non-transparent pixel, i.e. the video
+    // has actually drawn something.
+    bool HasVisiblePixels()
+    {
+        for (int i = 3; i < pixelBuffer.Length; i += 4)
+            if (pixelBuffer[i] != 0) return true;
+        return false;
     }
 
     // Wipes the visible bitmap so the last frame of a clip can't reappear
@@ -192,12 +201,13 @@ class VideoPopup : Window
         bitmap.WritePixels(new Int32Rect(0, 0, W, H), emptyPixels, W * 4, 0);
     }
 
-    // Hides the popup and waits a random amount of time before the next clip.
+    // Blanks the popup, throws away the finished player, and waits a random
+    // amount of time before the next clip.
     void StartCooldown()
     {
-        Hide();
-        player.Stop();
+        clipActive = false;
         ClearBitmap();
+        DisposePlayer();
         double seconds = MinCooldownSeconds + rng.NextDouble() * (MaxCooldownSeconds - MinCooldownSeconds);
         cooldownTimer.Interval = TimeSpan.FromSeconds(seconds);
         cooldownTimer.Start();
@@ -209,19 +219,54 @@ class VideoPopup : Window
 
         var path = videos[rng.Next(videos.Length)];
 
-        // Clear the old source first. Assigning the same file again is otherwise
-        // treated as "no change", leaving the player parked at the end of the clip.
-        player.Stop();
-        player.Close();
-        player.Source = null;
         ClearBitmap();
+        DisposePlayer();
+        CreatePlayer();
+
+        frameSkip = 0;
+        mediaOpened = false;
+        waitingForFirstFrame = true;
+        clipActive = true;
 
         player.Source = new Uri(path);
-        player.Position = TimeSpan.Zero;
-        frameSkip = 0;
-        waitingForFirstFrame = true;
         player.Play();
-        // The window is shown from OnRendering once the first frame is ready.
+        // Frames start appearing from OnRendering once the first real one is decoded.
+    }
+
+    // Builds a brand-new MediaElement in the hidden host for the next clip.
+    void CreatePlayer()
+    {
+        player = new MediaElement
+        {
+            LoadedBehavior = MediaState.Manual,
+            UnloadedBehavior = MediaState.Manual,
+            Stretch = Stretch.Uniform,
+            Volume = 0.7
+        };
+        player.MediaOpened += OnMediaOpened;
+        player.MediaEnded += OnMediaEnded;
+        hiddenHost.Content = player;
+    }
+
+    void DisposePlayer()
+    {
+        if (player == null) return;
+        player.MediaOpened -= OnMediaOpened;
+        player.MediaEnded -= OnMediaEnded;
+        player.Stop();
+        player.Close();
+        hiddenHost.Content = null;
+        player = null;
+    }
+
+    void OnMediaOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender == player) mediaOpened = true;
+    }
+
+    void OnMediaEnded(object sender, RoutedEventArgs e)
+    {
+        if (sender == player) StartCooldown();
     }
 
     [STAThread]
